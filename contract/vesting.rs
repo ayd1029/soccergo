@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("BcroFbJbtLkLM2WpH6ZGqmLhzrjPZn4T8rWbV6jhhoxM");
+declare_id!("BmHxB7e3UYFyvtB1hUQx3ZyjUrh9StnBFNvMm7TF2eeE");
 
 const CATEGORY_MAX_LEN: usize = 50;
 const DISCRIMINATOR_SIZE: usize = 8;
@@ -27,6 +27,13 @@ const VESTING_ACCOUNT_SPACE: usize = DISCRIMINATOR_SIZE
 #[program]
 pub mod vesting {
     use super::*;
+    // deployer admin 설정
+    pub fn initialize_deployer(ctx: Context<InitializeDeployer>) -> Result<()> {
+        let deployer_admin = &mut ctx.accounts.deploy_admin;
+        deployer_admin.deployer = ctx.accounts.deployer.key();
+        Ok(())
+    }
+
     // admin 계정 설정
     pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
         let admin_config = &mut ctx.accounts.admin_config;
@@ -37,7 +44,13 @@ pub mod vesting {
     pub fn do_vesting(ctx: Context<DoVesting>, amount: u64) -> Result<()> {
         let now = Clock::get()?;
         let vesting_account = &mut ctx.accounts.vesting_account;
+        let admin = &ctx.accounts.admin;
+        let admin_config = &ctx.accounts.admin_config;
 
+        require!(
+            admin_config.admin == admin.key(),
+            VestingError::Unauthorized
+        );
         require!(vesting_account.is_active, VestingError::NotActive);
         require!(
             vesting_account.last_release_time <= now.unix_timestamp,
@@ -308,6 +321,14 @@ pub mod vesting {
         Ok(())
     }
 
+    pub fn remove_admin(ctx: Context<RemoveAdmin>) -> Result<()> {
+        require!(
+            ctx.accounts.deployer_admin.deployer == ctx.accounts.deployer.key(),
+            VestingError::NotDeployAdmin
+        );
+
+        Ok(())
+    }
 }
 
 // 베스팅 정보 저장
@@ -334,6 +355,28 @@ pub struct VestingAccount {
 #[account]
 pub struct AdminConfig {
     pub admin: Pubkey,
+}
+
+#[account]
+pub struct DeployAdmin {
+    pub deployer: Pubkey,
+}
+
+#[derive(Accounts)]
+pub struct InitializeDeployer<'info> {
+    #[account(mut)]
+    pub deployer: Signer<'info>, // 배포자 = signer
+
+    #[account(
+        init,
+        payer = deployer,
+        space = 8 + 32, // discriminator + pubkey
+        seeds = [b"deploy_admin"],
+        bump
+    )]
+    pub deploy_admin: Account<'info, DeployAdmin>,
+
+    pub system_program: Program<'info, System>,
 }
 
 // 프로그램 초기화 시 admin 설정을 위한 구조체
@@ -378,6 +421,13 @@ pub struct DoVesting<'info> {
         bump
     )]
     pub vesting_account: Account<'info, VestingAccount>,
+
+    #[account(
+        has_one = admin @ VestingError::Unauthorized,
+        seeds = [b"admin", admin.key().as_ref()],
+        bump
+    )]
+    pub admin_config: Account<'info, AdminConfig>,
 
     /// CHECK: 수혜자
     pub beneficiary: AccountInfo<'info>,
@@ -611,6 +661,28 @@ pub struct UpdateVestingTimeArgs {
     pub new_end_time: i64,
 }
 
+#[derive(Accounts)]
+pub struct RemoveAdmin<'info> {
+    #[account(mut)]
+    pub deployer: Signer<'info>,
+
+    #[account(
+        seeds = [b"deploy_admin"],
+        bump
+    )]
+    pub deployer_admin: Account<'info, DeployAdmin>,
+
+    pub admin: AccountInfo<'info>,
+
+    #[account(
+        mut,
+        close = deployer,
+        seeds = [b"admin", admin.key().as_ref()],
+        bump
+    )]
+    pub admin_config: Account<'info, AdminConfig>,
+}
+
 #[event]
 pub struct VestingUpdated {
     pub vesting_account: Pubkey,
@@ -670,4 +742,6 @@ pub enum VestingError {
     InvalidParameters,
     #[msg("Add amount is overflow")]
     Overflow,
+    #[msg("You are not the deployer admin.")]
+    NotDeployAdmin,
 }
